@@ -1,6 +1,6 @@
 /*
-  WS8610Receiver - Arduino libary for decoding RF signals of WS-8610 Lacrosse wheater station sensors
-  Tested with TX3-TH 433Mhz sensor model
+  WS8610Receiver - Arduino library for decoding RF 433Mhz signals of Lacrosse wheater stations sensors
+  Tested with the following transimitter models: TX3-TH, TX4 and TX7U
 
   Based on RCSwitch library, by Suat Özgür (https://github.com/sui77/rc-switch/)
 */
@@ -10,8 +10,8 @@
 
 #define PW_FIXED 1000 // Pulse width for the "fixed" part of signal
 #define PW_SHORT 550  // Pulse width for the "short" part of signal
-#define PW_LONG 1350  // Pulse width for the "short" part of signal
-#define PW_TOLERANCE 90
+#define PW_LONG 1350  // Pulse width for the "long" part of signal
+#define PW_TOLERANCE 100
 
 #define TIMINGS_BUFFER_SIZE 88
 #define PACKET_SIZE 6

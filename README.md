@@ -1,6 +1,6 @@
 # WS8610Receiver
-Arduino libary for decoding RF signals of WS-8610 Lacrosse wheater station sensors
+Arduino library for decoding RF 433Mhz signals of Lacrosse wheater stations sensors.
 
-Tested with TX3-TH 433Mhz sensor model.
+Tested with sensor models TX3-TH, TX4 and TX7U.
 
-Inspired RCSwitch library, by Suat Özgür (https://github.com/sui77/rc-switch/)
+Inspired by RCSwitch library, by Suat Özgür (https://github.com/sui77/rc-switch/)
