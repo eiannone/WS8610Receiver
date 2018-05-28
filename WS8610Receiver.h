@@ -66,7 +66,8 @@
 #define PW_TOLERANCE 140
 
 #define TIMINGS_BUFFER_SIZE 88
-#define PACKET_SIZE 6
+#define PACKET_BUFFER_SIZE 20
+#define MEASURE_BUFFER_SIZE 10
 
 #ifdef ESP8266
     // interrupt handler and related code must be in RAM on ESP8266
@@ -77,36 +78,46 @@
 
 enum measureType : uint8_t {TEMPERATURE, HUMIDITY};
 
+struct packet {
+    uint32_t msec;
+    uint32_t timings[TIMINGS_BUFFER_SIZE];
+};
+
 struct measure {
+    uint32_t msec;
     uint8_t sensorAddr;
     measureType type;
-    int units;
+    int8_t units;
     uint8_t decimals;
 };
 
 class WS8610Receiver {
-    public:
-        WS8610Receiver(const int pin);
+public:
+    WS8610Receiver(const int pin);
+    void enableReceive();
+    void disableReceive();
+    int receivedMeasures();
+    measure getNextMeasure();
 
-        void enableReceive();
-        void disableReceive();
-        bool available();
-        void resetAvailable();
-        measure getReceivedValue();
+private:
+    static volatile uint32_t timingsBuf[TIMINGS_BUFFER_SIZE];
+    static volatile packet packets[PACKET_BUFFER_SIZE];
+    static volatile int packetPos;
+    int interrupt;
+    int lastPacketPos;
+    measure measures[MEASURE_BUFFER_SIZE];
+    int measurePos;
+    int lastMeasurePos;
 
-    private:
-        static void handleInterrupt();
-        static int decodeBit(const uint32_t pulse1, const uint32_t pulse2);
-        static uint8_t parity(const uint8_t b1, const uint8_t b2);
-        static void decodeTimings(int timingsPos);
-
-        int interrupt;
-        static volatile measure receivedValue;
-        static volatile uint32_t timingsBuf[TIMINGS_BUFFER_SIZE];
+    static void handleInterrupt();
+    int decodeBit(const uint32_t pulse1, const uint32_t pulse2);
+    bool decodePacket();
+    bool unreadMeasures();
 };
 
-volatile measure WS8610Receiver::receivedValue;
 volatile uint32_t WS8610Receiver::timingsBuf[TIMINGS_BUFFER_SIZE];
+volatile packet WS8610Receiver::packets[PACKET_BUFFER_SIZE];
+volatile int WS8610Receiver::packetPos = 0;
 
 // Board                               Digital Pins Usable For Interrupts
 // Uno, Nano, Mini, other 328-based    2, 3
@@ -121,6 +132,8 @@ WS8610Receiver::WS8610Receiver(const int pin) {
 #else
     this->interrupt = digitalPinToInterrupt(pin);
 #endif
+    for(int p = 0; p < PACKET_BUFFER_SIZE; p++) WS8610Receiver::packets[p].msec = 0;
+    measurePos = lastMeasurePos = 0;
 }
 
 
@@ -128,8 +141,8 @@ WS8610Receiver::WS8610Receiver(const int pin) {
  * Enable receiving data
  */
 void WS8610Receiver::enableReceive() {
-//    WS8610Receiver::receivedValue = { .sensorAddr = 0 };
-    WS8610Receiver::receivedValue.sensorAddr = 0;
+    WS8610Receiver::packetPos = 0;
+    lastPacketPos = 0;
     attachInterrupt(this->interrupt, handleInterrupt, CHANGE);
 }
 
@@ -140,21 +153,32 @@ void WS8610Receiver::disableReceive() {
     detachInterrupt(this->interrupt);
 }
 
-bool WS8610Receiver::available() {
-    return WS8610Receiver::receivedValue.sensorAddr != 0;
-}
+void RECEIVE_ATTR WS8610Receiver::handleInterrupt() {
+    static int timingPos = 0;
+    static uint32_t lastTime = 0;
+    static uint32_t lastSync = 0; // Number of timings since last sync signal
 
-void WS8610Receiver::resetAvailable() {
-    WS8610Receiver::receivedValue.sensorAddr = 0;
-}
+    const uint32_t time = micros();
+    const uint32_t duration = time - lastTime;
+    lastTime = time;
 
-measure WS8610Receiver::getReceivedValue() {    
-    return {
-        WS8610Receiver::receivedValue.sensorAddr,
-        WS8610Receiver::receivedValue.type,
-        WS8610Receiver::receivedValue.units,
-        WS8610Receiver::receivedValue.decimals
-    }; 
+    WS8610Receiver::timingsBuf[timingPos++] = duration;
+    if (timingPos == TIMINGS_BUFFER_SIZE) timingPos = 0;
+    lastSync++;
+
+    if (duration > 5000) { // Synchronization signal detected
+        // Sync signal must be at least one packet away from the previous one
+        if (lastSync > TIMINGS_BUFFER_SIZE) {
+            WS8610Receiver::packets[packetPos].msec = millis();
+            for(int t = 0; t < TIMINGS_BUFFER_SIZE; t++) {
+                WS8610Receiver::packets[packetPos].timings[t] = WS8610Receiver::timingsBuf[timingPos];
+                if (++timingPos == TIMINGS_BUFFER_SIZE) timingPos = 0;
+            }
+            packetPos++;
+            if (packetPos == PACKET_BUFFER_SIZE) packetPos = 0;
+        }
+        lastSync = 1;
+    }
 }
 
 int WS8610Receiver::decodeBit(const uint32_t pulse1, const uint32_t pulse2) {
@@ -171,64 +195,96 @@ int WS8610Receiver::decodeBit(const uint32_t pulse1, const uint32_t pulse2) {
     return -1;
 }
 
-uint8_t WS8610Receiver::parity(const uint8_t b1, const uint8_t b2) {
-    uint8_t t = b1 ^ b2;
-    t ^= t >> 4;
-    t ^= t >> 2;
-    t ^= t >> 1;
-    return t & 1;    
-}
+bool WS8610Receiver::decodePacket() {
+    volatile packet *p = &WS8610Receiver::packets[lastPacketPos];
+    if (++lastPacketPos == PACKET_BUFFER_SIZE) lastPacketPos = 0;
 
-void RECEIVE_ATTR WS8610Receiver::decodeTimings(int timingPos) {
-    uint8_t packet[PACKET_SIZE] = {0};
-
-    uint32_t t1, t2;
+    // Decode and pack the bits into an array of bytes
+    uint8_t bytes[6] = {0};
     int bit;
-    for(int b = 0; b < TIMINGS_BUFFER_SIZE / 2; b++) {
-        timingPos++;
-        if (timingPos == TIMINGS_BUFFER_SIZE) timingPos = 0;
-        t1 = WS8610Receiver::timingsBuf[timingPos];
-        timingPos++;
-        if (timingPos == TIMINGS_BUFFER_SIZE) timingPos = 0;
-        t2 = WS8610Receiver::timingsBuf[timingPos];
-        
-        bit = WS8610Receiver::decodeBit(t1, t2);
-        if (bit == -1) return; // Timings mismatch
-        
-        packet[b / 8] <<= 1;
-        if (bit == 1) packet[b / 8]++;
+    p->timings[TIMINGS_BUFFER_SIZE - 1] = PW_FIXED;
+    for(int b = 0; b < TIMINGS_BUFFER_SIZE; b += 2) {
+        bit = WS8610Receiver::decodeBit(p->timings[b], p->timings[b+1]);
+        if (bit == -1) {
+//            Serial.printf("Timings mismatch (%d, %d)\n", p->timings[b], p->timings[b+1]);
+            return false; // Timings mismatch
+        }
+
+        bytes[b / 16] <<= 1;
+        if (bit == 1) bytes[b / 16]++;
     }
+
+    // check start sequence
+    if (bytes[0] != 0x0A) {
+//        Serial.println("Wrong start sequence");
+        return false;
+    }
+
     // Check parity. Parity bit is #19 and it makes data bits (from #19 to #31) even
-    if (WS8610Receiver::parity(packet[2] & 0x1F, packet[3])) return; // Parity error
+    uint8_t bits = (bytes[2] & 0x1F) ^ bytes[3];
+    bits ^= bits >> 4;
+    bits ^= bits >> 2;
+    bits ^= bits >> 1;
+    if (bits & 1) {
+//        Serial.println("Parity error");
+        return false; // Parity error
+    }
 
     // Checksum
     uint8_t checksum = 0;
-    for(int b = 0; b < PACKET_SIZE - 1; b++) checksum += (packet[b] & 0xF) + (packet[b] >> 4);
-    if ((checksum & 0xF) != packet[PACKET_SIZE - 1]) return; // Checksum error
-
-    // check start sequence
-    if (packet[0] != 0x0A) return;
-
-    WS8610Receiver::receivedValue.sensorAddr = ((packet[1] << 3) & 0x7F) + (packet[2] >> 5);
-    WS8610Receiver::receivedValue.type = (packet[1] >> 4)? HUMIDITY : TEMPERATURE;
-    WS8610Receiver::receivedValue.units = (int)(packet[2] & 0xF) * 10 + (packet[3] >> 4) - ((packet[1] >> 4)? 0 : 50);
-    WS8610Receiver::receivedValue.decimals = packet[3] & 0xF;
-}
-
-void RECEIVE_ATTR WS8610Receiver::handleInterrupt() {
-    static int timingPos = 0;
-    static uint32_t lastTime = 0;
-
-    const uint32_t time = micros();
-    const uint32_t duration = time - lastTime;
-
-    if (duration > 50000) { // Synchronization signal detected
-        WS8610Receiver::timingsBuf[timingPos] = PW_FIXED;
-        WS8610Receiver::decodeTimings(timingPos);
+    for(int b = 0; b < 5; b++) checksum += (bytes[b] & 0xF) + (bytes[b] >> 4);
+    if ((checksum & 0xF) != bytes[5]) {
+//        Serial.println("Checksum error");
+        return false; // Checksum error
     }
 
-    if (timingPos >= TIMINGS_BUFFER_SIZE) timingPos = 0;
-    WS8610Receiver::timingsBuf[timingPos++] = duration;
-    lastTime = time;  
+    measures[measurePos].msec = p->msec;
+    measures[measurePos].sensorAddr = ((bytes[1] << 3) & 0x7F) + (bytes[2] >> 5);
+    measures[measurePos].type = (bytes[1] >> 4)? HUMIDITY : TEMPERATURE;
+    measures[measurePos].units = (int8_t)(bytes[2] & 0xF) * 10 + (bytes[3] >> 4) - ((bytes[1] >> 4)? 0 : 50);
+    measures[measurePos].decimals = bytes[3] & 0xF;
+    if (++measurePos == MEASURE_BUFFER_SIZE) measurePos = 0;
+    return true;
+}
+
+int WS8610Receiver::receivedMeasures() {
+    // Counts how many unread measures there are in the buffer
+    int unreadMeasures = measurePos - lastMeasurePos;
+    if (unreadMeasures < 0) unreadMeasures += MEASURE_BUFFER_SIZE;
+
+    // Checks if there is any new measure among the received packets and decodes them
+    while(lastPacketPos != WS8610Receiver::packetPos) {
+        // Tries to decode a packet
+        if (decodePacket()) unreadMeasures++;
+    }
+    return unreadMeasures;
+}
+
+bool WS8610Receiver::unreadMeasures() {
+    // Checks if there are unread measures in the buffer
+    if (lastMeasurePos != measurePos) return true;
+
+    // Checks if there is any new measure in the received packets and decodes it
+    while(lastPacketPos != WS8610Receiver::packetPos) {
+        // Tries to decode a packet
+        if (decodePacket()) return true;
+    }
+    return false;
+}
+
+measure WS8610Receiver::getNextMeasure() {
+    // Checks if there are unread measures in the buffer
+    if (!unreadMeasures()) return { 0, 0, TEMPERATURE, 0, 0 };
+
+    // There are unread measures in the buffer, get the next one
+    measure* m = &measures[lastMeasurePos];
+    if (++lastMeasurePos == MEASURE_BUFFER_SIZE) lastMeasurePos = 0;
+    return {
+        m->msec,
+        m->sensorAddr,
+        m->type,
+        m->units,
+        m->decimals
+    };
 }
 #endif
