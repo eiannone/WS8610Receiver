@@ -1,17 +1,17 @@
 /*
   WS8610Receiver - Arduino library for decoding RF 433Mhz signals of Lacrosse wheater stations sensors
-  Tested with the following transimitter models: TX3-TH, TX4 and TX7U
+  Tested with the following transmitter models: TX3-TH, TX4 and TX7U
 
   Based on RCSwitch library, by Suat Özgür (https://github.com/sui77/rc-switch/)
   
   OVERVIEW OF MAIN LOGIC 
   (by @Joetgithub https://github.com/Joetgithub/TX7U/blob/master/TX7UReceiver.ino)
   
-  Continously loads pulses into a rolling buffer that is sized to hold one temp
+  Continuously loads pulses into a rolling buffer that is sized to hold one temp
   or humidity reading. About every 57 seconds the TX4 and TX7 sensors send a
   data transmission consisting of a 44 bit temperature sequence followed by a
   repeat of that same 44 bit temperature sequence followed by a 44 bit humidity
-  sequence.  A relativly long delay occurs after each temp/humidity 44 bit sequence
+  sequence.  A relatively long delay occurs after each temp/humidity 44 bit sequence
   and that delay is used as the trigger to evaluate the contents of the buffer and
   obtain the data values from the respective sequence.
   A pulse is the time in microseconds between changes in the data pin. The pulses
@@ -60,10 +60,10 @@
 #ifndef WS8610Receiver_h
 #define WS8610Receiver_h
 
-#define PW_FIXED 1000 // Pulse width for the "fixed" part of signal
+#define PW_FIXED 1050 // Pulse width for the "fixed" part of signal
 #define PW_SHORT 550  // Pulse width for the "short" part of signal
-#define PW_LONG 1350  // Pulse width for the "long" part of signal
-#define PW_TOLERANCE 100
+#define PW_LONG 1340  // Pulse width for the "long" part of signal
+#define PW_TOLERANCE 140
 
 #define TIMINGS_BUFFER_SIZE 88
 #define PACKET_SIZE 6
@@ -75,7 +75,7 @@
     #define RECEIVE_ATTR
 #endif
 
-enum measureType {TEMPERATURE, HUMIDITY};
+enum measureType : uint8_t {TEMPERATURE, HUMIDITY};
 
 struct measure {
     uint8_t sensorAddr;
@@ -96,7 +96,7 @@ class WS8610Receiver {
 
     private:
         static void handleInterrupt();
-        static decodeBit(const uint32_t pulse1, const uint32_t pulse2);
+        static int decodeBit(const uint32_t pulse1, const uint32_t pulse2);
         static uint8_t parity(const uint8_t b1, const uint8_t b2);
         static void decodeTimings(int timingsPos);
 
@@ -128,7 +128,8 @@ WS8610Receiver::WS8610Receiver(const int pin) {
  * Enable receiving data
  */
 void WS8610Receiver::enableReceive() {
-    WS8610Receiver::receivedValue = { .sensorAddr = 0};
+//    WS8610Receiver::receivedValue = { .sensorAddr = 0 };
+    WS8610Receiver::receivedValue.sensorAddr = 0;
     attachInterrupt(this->interrupt, handleInterrupt, CHANGE);
 }
 
@@ -160,7 +161,7 @@ int WS8610Receiver::decodeBit(const uint32_t pulse1, const uint32_t pulse2) {
     // Check second pulse (fixed width)
     uint32_t pw_diff = (pulse2 > PW_FIXED)? (pulse2 - PW_FIXED) : (PW_FIXED - pulse2);
     if (pw_diff > PW_TOLERANCE) return -1;
-    
+
     // Check first pulse (long or short)
     if (pulse1 < PW_SHORT) return ((PW_SHORT - pulse1) < PW_TOLERANCE)? 1 : -1;
     if (pulse1 > PW_LONG) return ((pulse1 - PW_LONG) < PW_TOLERANCE)? 0 : -1;
@@ -208,12 +209,10 @@ void RECEIVE_ATTR WS8610Receiver::decodeTimings(int timingPos) {
     // check start sequence
     if (packet[0] != 0x0A) return;
 
-    WS8610Receiver::receivedValue = {
-        .sensorAddr = ((packet[1] << 3) & 0x7F) + (packet[2] >> 5),
-        .type = (packet[1] >> 4)? HUMIDITY : TEMPERATURE,
-        .units = (int)(packet[2] & 0xF) * 10 + (packet[3] >> 4) - ((packet[1] >> 4)? 0 : 50),
-        .decimals = packet[3] & 0xF
-    };    
+    WS8610Receiver::receivedValue.sensorAddr = ((packet[1] << 3) & 0x7F) + (packet[2] >> 5);
+    WS8610Receiver::receivedValue.type = (packet[1] >> 4)? HUMIDITY : TEMPERATURE;
+    WS8610Receiver::receivedValue.units = (int)(packet[2] & 0xF) * 10 + (packet[3] >> 4) - ((packet[1] >> 4)? 0 : 50);
+    WS8610Receiver::receivedValue.decimals = packet[3] & 0xF;
 }
 
 void RECEIVE_ATTR WS8610Receiver::handleInterrupt() {
