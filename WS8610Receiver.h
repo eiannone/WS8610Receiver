@@ -60,14 +60,15 @@
 #ifndef WS8610Receiver_h
 #define WS8610Receiver_h
 
-#define PW_FIXED 1050 // Pulse width for the "fixed" part of signal
-#define PW_SHORT 550  // Pulse width for the "short" part of signal
-#define PW_LONG 1340  // Pulse width for the "long" part of signal
-#define PW_TOLERANCE 140
+#define PW_FIXED 1030 // Pulse width for the "fixed" part of signal
+#define PW_SHORT 560  // Pulse width for the "short" part of signal
+#define PW_LONG 1370  // Pulse width for the "long" part of signal
+#define PW_TOLERANCE 200
 
 #define TIMINGS_BUFFER_SIZE 88
 #define PACKET_BUFFER_SIZE 20
 #define MEASURE_BUFFER_SIZE 10
+#define NOISE_THRESHOLD 180     // Typical noise pulse duration
 
 #ifdef ESP8266
     // interrupt handler and related code must be in RAM on ESP8266
@@ -156,14 +157,25 @@ void WS8610Receiver::disableReceive() {
 void RECEIVE_ATTR WS8610Receiver::handleInterrupt() {
     static int timingPos = 0;
     static uint32_t lastTime = 0;
-    static uint32_t lastSync = 0; // Number of timings since last sync signal
+    static uint32_t lastSync = 0;    // Number of timings since last sync signal
+    static uint32_t noiseTiming = 0; // Timing interpolation for noise filter
 
     const uint32_t time = micros();
-    const uint32_t duration = time - lastTime;
+    uint32_t duration = time - lastTime;
     lastTime = time;
+    if (duration < NOISE_THRESHOLD) {
+        // Probably this short pulse is noise, so we ignore it
+        WS8610Receiver::timingsBuf[timingPos] += duration / 2;
+        noiseTiming += duration / 2;
+        return;
+    }
+    else if (noiseTiming > 0) {
+        duration += noiseTiming;
+        noiseTiming = 0;
+    }
 
-    WS8610Receiver::timingsBuf[timingPos++] = duration;
-    if (timingPos == TIMINGS_BUFFER_SIZE) timingPos = 0;
+    if (++timingPos == TIMINGS_BUFFER_SIZE) timingPos = 0;
+    WS8610Receiver::timingsBuf[timingPos] = duration;
     lastSync++;
 
     if (duration > 5000) { // Synchronization signal detected
@@ -171,11 +183,10 @@ void RECEIVE_ATTR WS8610Receiver::handleInterrupt() {
         if (lastSync > TIMINGS_BUFFER_SIZE) {
             WS8610Receiver::packets[packetPos].msec = millis();
             for(int t = 0; t < TIMINGS_BUFFER_SIZE; t++) {
-                WS8610Receiver::packets[packetPos].timings[t] = WS8610Receiver::timingsBuf[timingPos];
                 if (++timingPos == TIMINGS_BUFFER_SIZE) timingPos = 0;
+                WS8610Receiver::packets[packetPos].timings[t] = WS8610Receiver::timingsBuf[timingPos];
             }
-            packetPos++;
-            if (packetPos == PACKET_BUFFER_SIZE) packetPos = 0;
+            if (++packetPos == PACKET_BUFFER_SIZE) packetPos = 0;
         }
         lastSync = 1;
     }
